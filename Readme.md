@@ -1,37 +1,36 @@
 
-В текущей версии - если сделать нескоько запросов в минуту - поймаем каптчу.
-Распознавание каптчи здесь не реализовано.
-Просто подождать и повторить запрос через пару минут.
-Но зато удалось добиться чтобы сервер не блокировал наш парсер по IP.
+In the current version - if you make several requests per minute - you will catch the captcha.
+Captcha recognition is not implemented here.
+Just wait and repeat the request in a couple of minutes.
+But we managed to ensure that the server does not block our parser by IP.
 
-Возможно добавление нескольких прокси
-Но задача сложная т.к. необходимо под каждый IP запоминать свои cookies
-И парсер иногда делает несколько подряд успешных запросов с одного IP
-  
+It is possible to add several proxies
+But the task is difficult because it is necessary to remember your cookies for each IP
+And the parser sometimes makes several successful requests in a row from one IP
 
-# ПОСТАНОВКА ЗАДАЧИ
- Защита сервера COPART
- 1. раз в 5 минут проверка поддерживет ли клиент JS - подсовывается обфусцирофванный JS код, который вычисляет ключ сессии и закидывает в кукиесы
- 2. ключ сессии привязывается к IP
- 3. после успешной генерации ключа сессии несколько минут клиент с этого IP может делать запросы вообще без cookies
- 4. если серверу что то не понравится - блокирует по IP на пару часов
- 5. сайт на Ангуляре, есть JSON API - от куда и берем данные о лотах
+# STATEMENT OF THE PROBLEM
+COPART server protection
+1. every 5 minutes check whether the client supports JS - obfuscated JS code is slipped in, which calculates the session key and throws it into cookies
+2. the session key is tied to the IP
+3. after successful generation of the session key, the client from this IP can make requests without cookies at all for a few minutes
+4. if the server doesn't like something - it blocks by IP for a couple of hours
+5. the site is on Angular, there is a JSON API - from where we get the data on the lots
 
-# Защита сервера iaai
- 1. подсовывается обфусцирофванный JS код, который вычисляет ключ сессии и закидывает в кукиесы
- 2. запрещены запросы без ключа сессии
- 3. сайт без JSON API (данные парсим из HTML) данные лота
+# iaai server protection
+1. obfuscated JS code is slipped in, which calculates the session key and throws it into cookies
+2. requests without a session key are prohibited
+3. a site without JSON API (we parse data from HTML) lot data
 
+# Options solutions Justification for choosing a solution
+1. Connect a zombie browser on the server via Slenium (advantages - a full-fledged browser will bypass all protection, disadvantages - each request takes a few seconds until the browser is up)
+2. On pure NodeJs with pappytear (Chromium) - disadvantage, you need to forward a port and raise a server on NodeJS to process requests
+3. PHP + NodeJs (php makes the main requests, and if the protection is triggered, we call nodejs every five minutes)
 
-# Варианты решения Обоснование выбора решения
- 1. Подключить зомби браузер на сервере через Slenium (достоинства - полноценный браузер обойдет все защиты, недостатки - каждый запрос неколько секунд, пока подымется браузер)
- 2. На чистом NodeJs с pappytear (Хромиум) - недостаток, надо прокидывать порт и подымать сервер на NodeJS для обработки запросов
- 3. PHP + NodeJs (php делает основные запросы, и если срабатывает защита раз в пять минут вызываем nodejs)
+# Algorithm for bypassing server protection COPART
+1. We make a PHP request (with OUTGOING cookies that we received in paragraph 4. or without them if the zero step) we catch INCOMING cookies in file for future PHP requests
+2. If the data is received - we display the RESULT
+3. If the data is not received - we call Nodejs - with a high degree of probability we get the desired JSON - output the RESULT
 
-# Алгоритм обхода защиты сервера COPART
- 1. Делаем запрос PHP (с ИСХОДЯЩИМИ кукиесами которые получили в пп 4. или без них если нулевой шаг) ловим ВХОДЯЩИЕ кукесы в file ля будущих PHP запросов
- 2. Если данне получены - выводим РЕЗУЛЬТАТ
- 3. Если данные не получены - вызываем Nodejs - с высокой долей вероятности получаем нужный JSON  - выводим РЕЗУЛЬТАТ 
-Комментарий - почему куки из пп 3 не передаем в пп 1 - это магия. Сервер фиксирует в пп 3 успешный JS клиент и далее доверяет PHP в пп 1 который  работает со своими куками в file
+Comment - why don't we pass cookies from pp 3 to pp 1 - it's magic. The server records a successful JS client in pp 3 and then trusts PHP in pp 1, which works with its cookies in file
 
- # возможно также стоит переписать iaai для ускорения (он работает только на NodeJs)
+# maybe it's also worth rewriting iaai to speed it up (it only works on NodeJs)
