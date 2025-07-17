@@ -1,499 +1,583 @@
 <?php
+
 //
 // https://2kata.ru/_novikov/index.php
 //
 
-
-class carParser
+class CarParser
 {
-    public $file_cookies = 'cookies_file.txt';
-    public $curl_debug = 0;
-    public $income_url = '';
+    // Constants for configuration and readability
+    private const COOKIES_FILE_NAME = 'cookies_file.txt';
+    private const COPART_COOKIES_SUFFIX = '.copart.txt';
+    private const IAAI_COOKIES_SUFFIX = '.iaai.txt';
+    private const NODEJS_COOKIE_SCRIPT_IAAI = 'cookie.js';
+    private const NODEJS_COOKIE_SCRIPT_COPART = 'cookieCopart.js';
+    private const MIN_COOKIE_VALUE_LENGTH = 20; // Used in cookies_parse_from_file
 
+    // Public properties (consider making private with getters if stricter control is needed)
+    public string $incomeUrl;
+    public int $curlDebug = 0;
 
-    private $current_lot_id = '';
-    private $current_cookies_file_content = '';
-    private $current_cookies_from_nodejs = '';
-    private $current_json_responce = '';
+    // Private properties for internal state
+    private string $fileCookiesPath;
+    private string $currentLotId = '';
+    private string $currentCookiesFileContent = '';
+    private string $currentCookiesFromNodeJs = '';
+    private string $currentJsonResponse = '';
 
-    function __construct($income_url)
+    /**
+     * Constructor for CarParser.
+     *
+     * @param string $incomeUrl The URL of the car listing to parse.
+     */
+    public function __construct(string $incomeUrl)
     {
+        $this->incomeUrl = $incomeUrl;
 
-        // ЛОКАЛЬНАЯ КОПИЯ НА ВИНДЕ
+        // Determine base cookie file path based on environment
         if ($_SERVER['HTTP_HOST'] === 'car-parse.loc') {
-            $this->file_cookies = 'C:/OSPanel/domains/car-parse.loc/' . $this->file_cookies;
+            $this->fileCookiesPath = 'C:/OSPanel/domains/car-parse.loc/' . self::COOKIES_FILE_NAME;
+        } else {
+            $this->fileCookiesPath = __DIR__ . '/' . self::COOKIES_FILE_NAME;
         }
 
-        // проанализируем содержимео на предмет нужныъ нам ключевых ключей
-        $this->income_url = $income_url;
-        if (strpos($this->income_url, 'copart.com')) {
-            $this->file_cookies = $this->file_cookies . '.copart.txt';
-            $this->current_cookies_file_content = $this->cookies_parse_from_file();
-            echo $this->copart();
-
-        } else if (strpos($this->income_url, 'iaai.com')) {
-            $this->file_cookies = $this->file_cookies . '.iaai.txt';
-            echo $this->iaai();
-
+        // Route to the appropriate parser based on the URL
+        if (str_contains($this->incomeUrl, 'copart.com')) {
+            $this->fileCookiesPath .= self::COPART_COOKIES_SUFFIX;
+            // Load existing cookies content at construction for Copart specific logic
+            $this->currentCookiesFileContent = $this->parseCookiesFromFile();
+            echo $this->handleCopart();
+        } elseif (str_contains($this->incomeUrl, 'iaai.com')) {
+            $this->fileCookiesPath .= self::IAAI_COOKIES_SUFFIX;
+            echo $this->handleIaai();
         } else {
             echo json_encode([
                 'error' => 1,
                 'error_desc' => 'Wrong URL',
-                'url' => $this->income_url,
+                'url' => $this->incomeUrl,
             ]);
         }
     }
 
-
-    function copart()
+    /**
+     * Handles parsing logic for Copart URLs.
+     *
+     * @return string JSON encoded result or error.
+     */
+    private function handleCopart(): string
     {
+        preg_match('~/lot/([0-9]+)~', $this->incomeUrl, $matches);
+        if (!isset($matches[1])) {
+            $this->log('copart_bad.txt', ['error_desc' => 'Could not extract lot ID', 'url' => $this->incomeUrl]);
+            return json_encode([
+                'error' => 1,
+                'error_desc' => 'Could not extract lot ID',
+                'url' => $this->incomeUrl,
+            ]);
+        }
+        $this->currentLotId = $matches[1];
+        $allRequestedListDebug = [];
 
-        preg_match('~/lot/([0-9]+)~', $this->income_url, $d);
-        $this->current_lot_id = $d[1];
-        $all_requested_list_debug = [];
-
-
-        // НЕ ВАЖНО ОТ ТОГО БЫЛИ ЛИ КУИКИ ЛИ НЕТ - ДЕЛАЕМ НУЛЕВОЙ ШАГ ИНИЦИИРУЕМ КУКИ или сразу получаем ответ еис они были
-        // запос со старыми куками если они есть
-        $this->current_json_responce = $this->send_http_request(
-            "https://www.copart.com/public/data/lotdetails/solr/" . $this->current_lot_id,
+        // Attempt initial request with existing cookies (if any)
+        $this->currentJsonResponse = $this->sendHttpRequest(
+            "https://www.copart.com/public/data/lotdetails/solr/" . $this->currentLotId,
             "GET",
-            [
-                'authority: www.copart.com',
-                'pragma: no-cache',
-                'cache-control: no-cache',
-                'upgrade-insecure-requests: 1',
-                'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
-                'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-                'sec-fetch-site: none',
-                'sec-fetch-mode: navigate',
-                'sec-fetch-user: ?1',
-                'sec-fetch-dest: document',
-                'accept-language: en,ru;q=0.9,uk;q=0.8',
-                //'cookie: ' . $this->current_cookies, !!!!!!!!!!!!! куки в файле
-            ],
-            false // орати нимание этот же покси на NodeJS
+            $this->getCopartHeaders()
+            // Cookies are handled by CURLOPT_COOKIEFILE/CURLOPT_COOKIEJAR
         );
 
-
-        $all_requested_list_debug[] = [
-            'name' => 'first step result НЕВАЖНО БЫЛИ ЛИ КУКИ',
-            'current_cookies_file_content' => $this->cookies_parse_from_file(),
-            'current_cookies_from_nodejs' => 'пусто пока',
-            'responce' => $this->current_json_responce
+        $allRequestedListDebug[] = [
+            'name' => 'First step result (with existing file cookies)',
+            'current_cookies_file_content' => $this->parseCookiesFromFile(),
+            'current_cookies_from_nodejs' => 'N/A yet',
+            'response' => $this->currentJsonResponse,
         ];
 
-        // ЭТО НУЛЕВОЙ ЗАПРОС НА ПУСТОМ СЕРВЕРЕ ?? нет кук
-        // ИЛИ ДАВНО НЕ ДАЛЕЛИ ЗАПРОСЫ?
-        // ПЕРВЫЙ ЗАПРОС ХРЕНОВЫЙ - нам отказали ! ДЕЛАЕМ ВТОРОЙ С ПАПИТИРОМ
-        // получаем НЕДОСТАЮЩИЕ КУКИ И ДЕЛАЕМ ИНЬТЕКЦИЮ К СУЩЕСТВУЮЩИМ В ФАЙЛЕ
-        if (
-            strpos($this->current_json_responce, '_Incapsula_Resource')
-            or strpos($this->current_json_responce, 'Request unsuccessful')
-            or strpos($this->current_json_responce, 'Hacking attempt')
-            or trim($this->current_json_responce) == ''
-            or strlen($this->current_json_responce) < 20
-        ) {
+        // Check if the initial request was blocked or empty
+        if ($this->isCopartBlocked($this->currentJsonResponse)) {
+            // Attempt to get cookies/data using Node.js (Puppeteer)
+            $nodeJsResult = $this->nodeJsRequestGetCookiesAndData();
+            $this->currentCookiesFromNodeJs = $nodeJsResult['cookies'];
+            $this->currentJsonResponse = $nodeJsResult['data'];
 
+            $allRequestedListDebug[] = [
+                'name' => 'Node.js (Puppeteer) attempt result',
+                'current_cookies_file_content' => $this->parseCookiesFromFile(),
+                'current_cookies_from_nodejs' => $this->currentCookiesFromNodeJs,
+                'response' => $this->currentJsonResponse,
+            ];
 
-            // возможно все хорошо и уже здесь есть ОТВЕТ !!!!!
-            // возможно все хорошо и уже здесь есть ОТВЕТ !!!!!
-            // возможно все хорошо и уже здесь есть ОТВЕТ !!!!!
-            $this->current_json_responce = $this->nodeJsRequestGetCookiesORData();
-            $json = json_decode($this->current_json_responce, true);
-            if (isset($json["data"]["lotDetails"])) {
-
-                $result = [
-                    'year' => $json["data"]["lotDetails"]["lcy"],
-                    'location' => $json["data"]["lotDetails"]["yn"],
-                    'branchSeller' => $json["data"]["lotDetails"]["scn"],
-                    'engine' => $json["data"]["lotDetails"]["egn"],
-                    'fuel' => $json["data"]["lotDetails"]["ft"],
-                    'error' => 0,
-                    'url' => $this->income_url,
-                ];
-
-                $this->logs('copart_good.txt',
-                    [
-                        'comment' => 'NODEJS обработчик сработал',
-                        'result' => $result,
-                        'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                        'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                        'responce' => $this->current_json_responce,
-                        'debug' => $all_requested_list_debug,
-                    ]
-                );
-                return json_encode($result);
-
+            // If Node.js already got the data, process it
+            $parsedData = $this->tryParseCopartJson($this->currentJsonResponse);
+            if ($parsedData !== null) {
+                $this->log('copart_good.txt', [
+                    'comment' => 'NODEJS handler worked and provided direct data',
+                    'result' => $parsedData,
+                    'current_cookies_file_content' => $this->parseCookiesFromFile(),
+                    'current_cookies_from_nodejs' => $this->currentCookiesFromNodeJs,
+                    'response' => $this->currentJsonResponse,
+                    'debug' => $allRequestedListDebug,
+                ]);
+                return json_encode($parsedData);
             }
 
-            // только еслои куки имеют завтный ключ или два
-            //#HttpOnly_www.copart.com	FALSE	/	TRUE	0	G2JSESSIONID	2A2E3C99BCD47187AA19A98A20EE1749-n2
-            //#HttpOnly_.copart.com	TRUE	/	TRUE	1604949189	g2usersessionid	0b4f61da6613900ecce840bc5d774668
-            if (strpos($this->current_cookies_from_nodejs, 'session')) {
-
-                // ВСЕ НОРМ ПРОРВАЛИСЬ !!!!! G2JSESSIONID есть
-                // ВСЕ НОРМ ПРОРВАЛИСЬ !!!!! G2JSESSIONID есть
-                // ВСЕ НОРМ ПРОРВАЛИСЬ !!!!! G2JSESSIONID есть
-                //сбрасываем все куки
-                //unlink($this->file_cookies);
-
-                // запрос иньекцией новых кук
-                // делаем вторую попытку с новыми куками
-                $this->current_json_responce = $this->send_http_request(
-                    "https://www.copart.com/public/data/lotdetails/solr/" . $this->current_lot_id,
+            // If Node.js provided new cookies but not direct data, try again with injected cookies
+            if (!empty($this->currentCookiesFromNodeJs)) {
+                $this->currentJsonResponse = $this->sendHttpRequest(
+                    "https://www.copart.com/public/data/lotdetails/solr/" . $this->currentLotId,
                     "GET",
-                    [
-                        'authority: www.copart.com',
-                        'pragma: no-cache',
-                        'cache-control: no-cache',
-                        'upgrade-insecure-requests: 1',
-                        'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
-                        'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-                        'sec-fetch-site: none',
-                        'sec-fetch-mode: navigate',
-                        'sec-fetch-user: ?1',
-                        'sec-fetch-dest: document',
-                        'accept-language: en,ru;q=0.9,uk;q=0.8',
-                        'cookie: ' . $this->current_cookies_from_nodejs, // иньекция порции кук !!!!!!!!!!!!!
-                    ],
-                    false // орати нимание этот же покси на NodeJS
+                    array_merge($this->getCopartHeaders(), ['cookie: ' . $this->currentCookiesFromNodeJs])
                 );
 
-                $all_requested_list_debug[] = [
-                    'name' => 'second step result с НУЖНЫМИ куками G2JSESSIONID все норм прорвались !!!!! ЧТО жЕ МЫ ПОЛУЧИЛИ ?',
-                    'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                    'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                    'responce' => $this->current_json_responce
+                $allRequestedListDebug[] = [
+                    'name' => 'Second step result (with Node.js injected cookies)',
+                    'current_cookies_file_content' => $this->parseCookiesFromFile(),
+                    'current_cookies_from_nodejs' => $this->currentCookiesFromNodeJs,
+                    'response' => $this->currentJsonResponse,
                 ];
-
-
-            }
-            else {
-
-
-                $all_requested_list_debug[] = [
-                    'name' => 'СБРАСЫВАЕМ куки - МЫ НЕ ПОЛУЧИЛИ nodeJS НУЖНУЮ  G2JSESSIONID КУКУ - СКОРЕЙ ВСЕГО НАС СЕЙЧАС ЗАБАНЯТ за этот запрос',
-                    'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                    'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                    'responce' => $this->current_json_responce
-                ];
-
-                //сбрасываем все куки
-                unlink($this->file_cookies);
-
-
-//                $this->nodeJsRequestGetCookies();
-//
-//                // только еслои куки имеют завтный ключ или два
-//                //#HttpOnly_www.copart.com	FALSE	/	TRUE	0	G2JSESSIONID	2A2E3C99BCD47187AA19A98A20EE1749-n2
-//                //#HttpOnly_.copart.com	TRUE	/	TRUE	1604949189	g2usersessionid	0b4f61da6613900ecce840bc5d774668
-//                if (strpos($this->current_cookies_from_nodejs, 'session')) {
-//
-//                    die ("!!!!!!!!!!!!!!!!!!!!!!!!!!! БИНГО ");
-//
-//                }
-
-
-// ОСТАНОВИТЕ МЕНЯ !
-// ОСТАНОВИТЕ МЕНЯ !
-// ОСТАНОВИТЕ МЕНЯ !
-// ОСТАНОВИТЕ МЕНЯ !
-// ОСТАНОВИТЕ МЕНЯ !
-                $this->logs('copart_bad.txt',
-                    [
-                        'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                        'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                        'responce' => $this->current_json_responce,
-                        'debug' => $all_requested_list_debug,
-                    ]
-                );
+            } else {
+                // If Node.js failed to get any useful cookies, clear existing and report failure
+                @unlink($this->fileCookiesPath);
+                $this->log('copart_bad.txt', [
+                    'error_desc' => 'Node.js did not provide useful cookies.',
+                    'current_cookies_file_content' => $this->parseCookiesFromFile(),
+                    'current_cookies_from_nodejs' => $this->currentCookiesFromNodeJs,
+                    'response' => $this->currentJsonResponse,
+                    'debug' => $allRequestedListDebug,
+                ]);
                 return json_encode([
                     'error' => 1,
-                    'error_desc' => 'Dont see data NO COOKIES - catch BAN on 1-2 hours!',
-                    'url' => $this->income_url,
+                    'error_desc' => 'Failed to obtain necessary cookies from Node.js (potential ban).',
+                    'url' => $this->incomeUrl,
                 ]);
-
             }
-        } // КОНЕЦ КОГДА НАС ПОСЛАЛИ!!!
-
-        else {
-            $all_requested_list_debug[] = [
-                'name' => 'ЗАТАИЛИСЬ - возможно куки плохие ?? НО ВОЗМОЖНО И РЕЗУЛЬТАТИ ПОЙМАЛИ',
-                'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                'response' => $this->current_json_responce
-            ];
         }
 
-        $json = json_decode($this->current_json_responce, true);
-        if (isset($json["data"]["lotDetails"])) {
-
-            $result = [
-                'year' => $json["data"]["lotDetails"]["lcy"],
-                'location' => $json["data"]["lotDetails"]["yn"],
-                'branchSeller' => $json["data"]["lotDetails"]["scn"],
-                'engine' => $json["data"]["lotDetails"]["egn"],
-                'fuel' => $json["data"]["lotDetails"]["ft"],
-                'error' => 0,
-                'url' => $this->income_url,
-            ];
-
-            $this->logs('copart_good.txt',
-                [
-                    'comment' => 'PHP обработчик сработал',
-                    'result' => $result,
-                    'current_cookies_file_content' => $this->cookies_parse_from_file(),
-                    'current_cookies_from_nodejs' => $this->current_cookies_from_nodejs,
-                    'responce' => $this->current_json_responce,
-                    'debug' => $all_requested_list_debug,
-                ]
-            );
-            return json_encode($result);
-
+        // Final attempt to parse the JSON response
+        $parsedData = $this->tryParseCopartJson($this->currentJsonResponse);
+        if ($parsedData !== null) {
+            $this->log('copart_good.txt', [
+                'comment' => 'PHP handler worked (possibly after Node.js cookie injection)',
+                'result' => $parsedData,
+                'current_cookies_file_content' => $this->parseCookiesFromFile(),
+                'current_cookies_from_nodejs' => $this->currentCookiesFromNodeJs,
+                'response' => $this->currentJsonResponse,
+                'debug' => $allRequestedListDebug,
+            ]);
+            return json_encode($parsedData);
         }
 
-        $this->logs('copart_bad.txt',
-            [
-                'url' => $this->income_url,
-                'debug' => $all_requested_list_debug,
-                'response' => $this->current_json_responce,
-            ]
-        );
+        // If no data was found after all attempts
+        $this->log('copart_bad.txt', [
+            'url' => $this->incomeUrl,
+            'debug' => $allRequestedListDebug,
+            'response' => $this->currentJsonResponse,
+            'error_desc' => 'No data found in response after all attempts',
+        ]);
 
         return json_encode([
             'error' => 1,
-            'error_desc' => 'Dont see data EMPTY RESPONSE',
-            'url' => $this->income_url,
+            'error_desc' => 'Failed to retrieve data from Copart (empty or unparsable response).',
+            'url' => $this->incomeUrl,
         ]);
+    }
 
+    /**
+     * Checks if the Copart response indicates a block.
+     *
+     * @param string $response The HTTP response body.
+     * @return bool True if blocked, false otherwise.
+     */
+    private function isCopartBlocked(string $response): bool
+    {
+        return str_contains($response, '_Incapsula_Resource')
+            || str_contains($response, 'Request unsuccessful')
+            || str_contains($response, 'Hacking attempt')
+            || trim($response) === ''
+            || strlen($response) < self::MIN_COOKIE_VALUE_LENGTH; // Reusing constant for length check
+    }
 
+    /**
+     * Attempts to parse the Copart JSON response for lot details.
+     *
+     * @param string $jsonResponse The JSON string.
+     * @return array|null Parsed data array or null if data is not found.
+     */
+    private function tryParseCopartJson(string $jsonResponse): ?array
+    {
+        $json = json_decode($jsonResponse, true);
+        if (isset($json['data']['lotDetails'])) {
+            return [
+                'year' => $json['data']['lotDetails']['lcy'] ?? null,
+                'location' => $json['data']['lotDetails']['yn'] ?? null,
+                'branchSeller' => $json['data']['lotDetails']['scn'] ?? null,
+                'engine' => $json['data']['lotDetails']['egn'] ?? null,
+                'fuel' => $json['data']['lotDetails']['ft'] ?? null,
+                'error' => 0,
+                'url' => $this->incomeUrl,
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * Provides standard headers for Copart requests.
+     *
+     * @return array
+     */
+    private function getCopartHeaders(): array
+    {
+        return [
+            'authority: www.copart.com',
+            'pragma: no-cache',
+            'cache-control: no-cache',
+            'upgrade-insecure-requests: 1',
+            'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
+            'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'sec-fetch-site: none',
+            'sec-fetch-mode: navigate',
+            'sec-fetch-user: ?1',
+            'sec-fetch-dest: document',
+            'accept-language: en,ru;q=0.9,uk;q=0.8',
+        ];
     }
 
 
-    function send_http_request($url, $method, $headers, $use_proxy = false, $post_fields = '')
+    /**
+     * Handles parsing logic for IAAI URLs.
+     *
+     * @return string JSON encoded result or error.
+     */
+    private function handleIaai(): string
     {
+        // Execute Node.js script to get cookies
+        $this->currentCookiesFromNodeJs = $this->getNodeJsCookies(self::NODEJS_COOKIE_SCRIPT_IAAI);
+        if (empty($this->currentCookiesFromNodeJs)) {
+            $this->log('iaai_bad.txt', ['error_desc' => 'Failed to get cookies from Node.js for IAAI', 'url' => $this->incomeUrl]);
+            return json_encode([
+                'error' => 1,
+                'error_desc' => 'Failed to obtain cookies from Node.js for IAAI.',
+                'url' => $this->incomeUrl,
+            ]);
+        }
+
+        $htmlResponse = $this->sendHttpRequest(
+            $this->incomeUrl,
+            "GET",
+            $this->getIaaiHeaders()
+        );
+
+        // Check for "Lot is not exist" scenario
+        if (str_contains($htmlResponse, 'Object moved to')) {
+            $this->log('iaai_bad.txt', ['error_desc' => 'Lot is not exist', 'url' => $this->incomeUrl]);
+            return json_encode([
+                'error' => 1,
+                'error_desc' => 'Lot is not exist',
+                'url' => $this->incomeUrl,
+            ]);
+        }
+
+        $extractedData = $this->extractIaaiData($htmlResponse);
+
+        if ($extractedData !== null) {
+            $this->log('iaai_good.txt', ['result' => $extractedData]);
+            return json_encode($extractedData);
+        }
+
+        $this->log('iaai_dont_see.txt', [
+            'url' => $this->incomeUrl,
+            'html' => $htmlResponse,
+            'error_desc' => 'Could not extract all data from IAAI HTML',
+        ]);
+        return json_encode([
+            'error' => 1,
+            'error_desc' => 'Could not extract all data from IAAI HTML',
+            'url' => $this->incomeUrl,
+        ]);
+    }
+
+    /**
+     * Extracts vehicle data from IAAI HTML response using regex.
+     *
+     * @param string $htmlResponse The HTML content from IAAI.
+     * @return array|null Extracted data or null if not all fields are found.
+     */
+    private function extractIaaiData(string $htmlResponse): ?array
+    {
+        $data = [];
+        if (preg_match('/"heading-2">(\d+)/', $htmlResponse, $m)) {
+            $data['year'] = trim($m[1]);
+        }
+        if (preg_match('/Vehicle Location:<\/span>\s+<div\sclass="data-list__value">\s+<span>([^<]{5,45})</m', $htmlResponse, $m)) {
+            $data['location'] = trim($m[1]);
+        }
+        if (preg_match('/Selling Branch:<\/span>\s+<span class="data-list__value">([^<]{5,45})<\/span>/m', $htmlResponse, $m)) {
+            $data['branchSeller'] = trim($m[1]);
+        }
+        if (preg_match('/>([^<]+)<\/span>\s+<\/li>\s+<li class="data-list__item">\s+<span class="data-list__label">Transmission/m', $htmlResponse, $m)) {
+            $data['engine'] = trim($m[1]);
+        }
+        if (preg_match('/Fuel Type:<\/span>\s+<span class="data-list__value">\s+([^<]+)/m', $htmlResponse, $m)) {
+            $data['fuel'] = trim($m[1]);
+        }
+
+        // Check if all expected fields are present
+        $requiredFields = ['year', 'location', 'branchSeller', 'engine', 'fuel'];
+        foreach ($requiredFields as $field) {
+            if (!isset($data[$field])) {
+                return null; // Not all data found
+            }
+        }
+
+        $data['error'] = 0;
+        $data['url'] = $this->incomeUrl;
+        return $data;
+    }
+
+    /**
+     * Provides standard headers for IAAI requests.
+     *
+     * @return array
+     */
+    private function getIaaiHeaders(): array
+    {
+        return [
+            'Connection: keep-alive',
+            'Pragma: no-cache',
+            'Cache-Control: no-cache',
+            'Upgrade-Insecure-Requests: 1',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'Sec-Fetch-Site: same-origin',
+            'Sec-Fetch-Mode: navigate',
+            'Sec-Fetch-User: ?1',
+            'Sec-Fetch-Dest: document',
+            'Referer: https://www.iaai.com/VehicleSearch/SearchDetails?keyword=',
+            'Accept-Language: en,ru;q=0.9,uk;q=0.8',
+            'cookie: ' . $this->currentCookiesFromNodeJs, // Injected cookies from Node.js
+        ];
+    }
 
 
+    /**
+     * Sends an HTTP request using cURL.
+     *
+     * @param string $url The URL to request.
+     * @param string $method The HTTP method (GET, POST).
+     * @param array $headers An array of HTTP headers.
+     * @param bool $useProxy Whether to use a proxy (hardcoded).
+     * @param string $postFields The POST data string.
+     * @return string The server response.
+     */
+    private function sendHttpRequest(
+        string $url,
+        string $method,
+        array $headers,
+        bool $useProxy = false,
+        string $postFields = ''
+    ): string {
         $ch = curl_init();
 
         curl_setopt($ch, CURLOPT_URL, $url);
-        if ($method == "POST") {
-
-            if ($this->curl_debug) {
-                echo "*************** POST ***************";
+        if ($method === "POST") {
+            if ($this->curlDebug) {
+                echo "*************** POST Request ***************\n";
             }
             curl_setopt($ch, CURLOPT_POST, 1);
-
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
         }
 
-        if ($use_proxy) {
+        // Hardcoded proxy - consider making configurable or dynamic
+        if ($useProxy) {
             $proxy = "83.149.70.159:13012";
             curl_setopt($ch, CURLOPT_PROXY, $proxy);
         }
 
-        if ($post_fields)
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
-
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, TRUE);
-        if (!empty($headers))
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-
-        curl_setopt($ch, CURLOPT_COOKIEJAR, $this->file_cookies);
-        curl_setopt($ch, CURLOPT_COOKIEFILE, $this->file_cookies);
-        // Receive server response ...
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true); // Keep as true for security
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_COOKIEJAR, $this->fileCookiesPath);
+        curl_setopt($ch, CURLOPT_COOKIEFILE, $this->fileCookiesPath);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 
-
-        // DEBUG
-        if ($this->curl_debug) {
-            curl_setopt($ch, CURLOPT_HEADER, TRUE);
-            curl_setopt($ch, CURLINFO_HEADER_OUT, TRUE);
+        // Debugging output for cURL
+        if ($this->curlDebug) {
+            curl_setopt($ch, CURLOPT_HEADER, true);
+            curl_setopt($ch, CURLINFO_HEADER_OUT, true);
         }
 
-        $server_output = curl_exec($ch);
-        //$server_output = str_replace('src="', 'src="https://www.copart.com', $server_output);
+        $serverOutput = curl_exec($ch);
 
-
-        if ($this->curl_debug) {
+        if ($this->curlDebug) {
             echo "<textarea>";
-            echo "\r\n\r\n************************* Curl $url ответ:,n\n" . $server_output;
+            echo "\r\n\r\n************************* Curl $url Response: *************************\n" . $serverOutput;
             echo "</textarea>";
-            //echo " get_cs_rf {$this->get_cs_rf} \n";
-            //echo " file_cookies ".file_get_contents($this->file_cookies);
-            //echo " file_csrf ".file_get_contents($this->file_csrf);
-
-        }
-
-        // DEBUG
-        if ($this->curl_debug) {
-            echo "\r\n ************************ ответ на  " . $url . "************************\n\n";
-            print_r(curl_getinfo($ch), true);
+            echo "\r\n ************************ cURL Info for " . $url . " ************************\n\n";
+            print_r(curl_getinfo($ch));
         }
 
         curl_close($ch);
-        return $server_output;
+        return (string)$serverOutput;
     }
 
 
-    function iaai()
+    /**
+     * Writes messages to a log file.
+     *
+     * @param string $fileName The name of the log file.
+     * @param mixed $message The message to log (can be array, string, etc.).
+     */
+    private function log(string $fileName, mixed $message): void
     {
+        $logDir = __DIR__ . "/logs/";
+        if (!is_dir($logDir)) {
+            mkdir($logDir, 0777, true);
+        }
+        $fd = @fopen($logDir . $fileName, "a");
+        if ($fd) {
+            @fwrite($fd, date("Y-m-d H:i:s") . " -- " . print_r($message, true) . "\n");
+            @fclose($fd);
+        }
+    }
+
+
+    /**
+     * Parses cookies from the cookie file into a string suitable for HTTP headers.
+     *
+     * @return string Formatted cookie string.
+     */
+    private function parseCookiesFromFile(): string
+    {
+        $this->currentCookiesFileContent = @file_get_contents($this->fileCookiesPath);
+        $cookieString = '';
+        // Regex to match "KEY VALUE" pairs, allowing for various characters
+        preg_match_all('~([0-9a-zA-Z._-]+)\s+([0-9a-zA-Z=/\-_+.:,]+)$~im', $this->currentCookiesFileContent, $matches);
+
+        if (!empty($matches[1])) {
+            foreach ($matches[1] as $key => $name) {
+                $value = $matches[2][$key];
+                // Only include cookies with a reasonable length, heuristic to filter irrelevant ones
+                if (strlen($value) >= self::MIN_COOKIE_VALUE_LENGTH || str_contains(strtolower($name), 'session')) {
+                     $cookieString .= $name . '=' . $value . '; ';
+                }
+            }
+        }
+        return trim($cookieString, ' ;');
+    }
+
+    /**
+     * Executes a Node.js script to get cookies for IAAI (generic cookie getter).
+     *
+     * @param string $scriptName The name of the Node.js script to execute.
+     * @return string Formatted cookie string.
+     */
+    private function getNodeJsCookies(string $scriptName): string
+    {
+        $nodeJsCommand = '';
+        $scriptPath = __DIR__ . '/' . $scriptName;
+
         if ($_SERVER['HTTP_HOST'] === 'car-parse.loc') {
-            exec("cd " . __DIR__ . " && " . '"\Program Files\nodejs\node.exe" ' . "cookie.js 2>&1", $out, $err);
+            $nodeJsCommand = '"\Program Files\nodejs\node.exe" ' . $scriptPath;
         } else {
-            exec("cd " . __DIR__ . " &&  node cookie.js 2>&1", $out, $err);
-        }
-        $this->current_cookies = '';
-        foreach (json_decode($out[0], true) as $item) {
-            $this->current_cookies .= $item['name'] . '=' . $item['value'] . "; ";
+            $nodeJsCommand = 'node ' . $scriptPath;
         }
 
-        $html_responce = $this->send_http_request(
-            $this->income_url,
-            "GET",
-            [
-                'Connection: keep-alive',
-                'Pragma: no-cache',
-                'Cache-Control: no-cache',
-                'Upgrade-Insecure-Requests: 1',
-                'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36',
-                'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-                'Sec-Fetch-Site: same-origin',
-                'Sec-Fetch-Mode: navigate',
-                'Sec-Fetch-User: ?1',
-                'Sec-Fetch-Dest: document',
-                'Referer: https://www.iaai.com/VehicleSearch/SearchDetails?keyword=',
-                'Accept-Language: en,ru;q=0.9,uk;q=0.8',
-                // привязкав по IP - генерит хитрый JS этот ключ
-                'cookie: ' . $this->current_cookies,
-            ]
-        );
+        $output = [];
+        $returnVar = 0;
+        // Escape the URL if it contains spaces or special characters for shell execution
+        $escapedUrl = escapeshellarg($this->incomeUrl);
 
-//
-//<html><head><title>Object moved</title></head><body>
-//<h2>Object moved to <a href="/Vehiclelisting/Toyota/Highlander">here</a>.</h2>
-//</body></html>
+        // Execute the Node.js script to get cookies
+        // The script is expected to output a JSON string of cookies
+        exec("cd " . __DIR__ . " && " . $nodeJsCommand . " " . $escapedUrl . " 2>&1", $output, $returnVar);
 
-        if (preg_match('/Object moved to/', $html_responce, $m)) {
-            return json_encode([
-                'error' => 1,
-                'error_desc' => 'Lot is not exist',
-                'url' => $this->income_url,
-            ]);
+        $this->log('nodejs_iaai_debug.txt', ['command' => "cd " . __DIR__ . " && " . $nodeJsCommand . " " . $escapedUrl, 'output' => $output, 'return_var' => $returnVar]);
+
+        if ($returnVar !== 0 || empty($output[0])) {
+            return ''; // Node.js script failed or returned no output
         }
 
-        if (preg_match('/"heading-2">(\d+)/', $html_responce, $m)) {
-            $year = trim($m[1]);
+        $cookiesData = json_decode($output[0], true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($cookiesData)) {
+            $this->log('nodejs_iaai_error.txt', ['error' => 'Node.js output is not valid JSON for cookies.', 'output' => $output]);
+            return ''; // Invalid JSON
         }
 
-        if (preg_match('/Vehicle Location:<\/span>\s+<div\sclass="data-list__value">\s+<span>([^<]{5,45})</m', $html_responce, $m)) {
-            $location = trim($m[1]);
+        $cookieString = '';
+        foreach ($cookiesData as $item) {
+            if (isset($item['name']) && isset($item['value'])) {
+                $cookieString .= $item['name'] . '=' . $item['value'] . "; ";
+            }
         }
-
-        if (preg_match('/Selling Branch:<\/span>\s+<span class="data-list__value">([^<]{5,45})<\/span>/m', $html_responce, $m)) {
-            $branchSeller = trim($m[1]);
-        }
-
-
-        if (preg_match('/>([^<]+)<\/span>\s+<\/li>\s+<li class="data-list__item">\s+<span class="data-list__label">Transmission/m', $html_responce, $m)) {
-            $engine = trim($m[1]);
-        }
-
-        if (preg_match('/Fuel Type:<\/span>\s+<span class="data-list__value">\s+([^<]+)/m', $html_responce, $m)) {
-            $fuel = trim($m[1]);
-        }
-
-
-        if (isset($year, $location, $branchSeller, $engine, $fuel)) {
-            $result = [
-                'year' => $year,
-                'location' => $location,
-                'branchSeller' => $branchSeller,
-                'engine' => $engine,
-                'fuel' => $fuel,
-                'error' => 0,
-                'url' => $this->income_url,
-            ];
-            $this->logs('iaai_good.txt',
-                [
-                    'result' => $result,
-                ]
-            );
-            return json_encode($result);
-
-        }
-
-        $this->logs('iaai_dont_see.txt',
-            [
-                'url' => $this->income_url,
-                'html' => $html_responce,
-            ]
-        );
-        return json_encode([
-            'error' => 1,
-            'error_desc' => 'Dont see data',
-            'url' => $this->income_url,
-        ]);
-
-
-    }
-
-    public function logs($filelog_name, $message)
-    {
-
-        $fd = @fopen(__DIR__ . "/logs/" . $filelog_name, "a");
-        @fwrite($fd, date("Ymd-G:i:s") . " -- " . print_r($message, true) . "\n");
-        @fclose($fd);
+        return trim($cookieString, ' ;');
     }
 
 
-    public function cookies_parse_from_file()
+    /**
+     * Executes a Node.js script to get cookies AND/OR data for Copart.
+     *
+     * @return array An associative array containing 'cookies' (string) and 'data' (string).
+     */
+    private function nodeJsRequestGetCookiesAndData(): array
     {
-        $this->current_cookies_file_content = @file_get_contents($this->file_cookies);
-        $cookie = '';
-        preg_match_all('~([0-9a-z=/\-_+]*)\s+([0-9a-z=/\-_+]{20,})\s$~im', $this->current_cookies_file_content, $d);
-        if (!sizeof($d[1])) {
-            return $cookie;
-        }
-        foreach ($d[1] as $key => $item) {
-            //if (preg_match('~session~i', $d[1][$key]))
-            $cookie .= ' ' . $d[1][$key] . '=' . $d[2][$key] . '; ';
-        }
-        return trim($cookie, ' ;');
-    }
+        $nodeJsCommand = '';
+        $scriptPath = __DIR__ . '/' . self::NODEJS_COOKIE_SCRIPT_COPART;
 
-
-    public function nodeJsRequestGetCookiesORData()
-    {
-        //
         if ($_SERVER['HTTP_HOST'] === 'car-parse.loc') {
-            $nreq = 'cd ' . __DIR__ . ' && ' . '"\Program Files\nodejs\node.exe" ' . 'cookieCopart.js ' .
-                $this->current_lot_id . ' "' .
-                $this->cookies_parse_from_file() .
-                '" 2>&1';
-            exec($nreq, $out, $err);
+            $nodeJsCommand = '"\Program Files\nodejs\node.exe" ' . $scriptPath;
         } else {
-            $nreq = 'cd ' . __DIR__ . ' && node cookieCopart.js ' .
-                $this->current_lot_id . ' "' .
-                $this->cookies_parse_from_file() .
-                '" 2>&1';
-            exec($nreq, $out, $err);
-
+            $nodeJsCommand = 'node ' . $scriptPath;
         }
 
-        //$out[0] - депрекейтет сообщение что то тап по паттитиру
-        $responce = json_decode($out[1], true);
-        //достаем и cookies и data
+        // Escape arguments for shell execution
+        $escapedLotId = escapeshellarg($this->currentLotId);
+        $escapedCookies = escapeshellarg($this->parseCookiesFromFile());
 
-        //papyteear  $out[0]  - матюк о том что таймаут не поддержиается скооро в паттитире
-        foreach ($responce['cookies'] as $item) {
-            $this->current_cookies_from_nodejs .= $item['name'] . '=' . $item['value'] . "; ";
+        $command = "cd " . __DIR__ . " && " . $nodeJsCommand . " " . $escapedLotId . " " . $escapedCookies . " 2>&1";
+
+        $output = [];
+        $returnVar = 0;
+        exec($command, $output, $returnVar);
+
+        $this->log('nodejs_copart_debug.txt', ['command' => $command, 'output' => $output, 'return_var' => $returnVar]);
+
+        $rawResponse = '';
+        // Node.js Puppeteer might output deprecation warnings on $output[0]
+        // Assuming the actual JSON data/cookies are in $output[1] based on original code's $out[1] usage
+        if (isset($output[1])) {
+            $rawResponse = $output[1];
+        } elseif (isset($output[0])) {
+            // Fallback if there's no deprecation warning and data is in $output[0]
+            $rawResponse = $output[0];
         }
 
-        // контент выводим JSON если это он конечно
-        preg_match('~>{(.*)}<~', $responce['data'], $d);
-        return "{" . $d[1] . "}";
+        $decodedResponse = json_decode($rawResponse, true);
 
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($decodedResponse)) {
+            $this->log('nodejs_copart_error.txt', ['error' => 'Node.js output is not valid JSON.', 'raw_output' => $rawResponse, 'output_array' => $output, 'return_var' => $returnVar]);
+            return ['cookies' => '', 'data' => '']; // Return empty on error
+        }
+
+        $extractedCookies = '';
+        if (isset($decodedResponse['cookies']) && is_array($decodedResponse['cookies'])) {
+            foreach ($decodedResponse['cookies'] as $item) {
+                if (isset($item['name']) && isset($item['value'])) {
+                    $extractedCookies .= $item['name'] . '=' . $item['value'] . "; ";
+                }
+            }
+        }
+
+        $extractedData = $decodedResponse['data'] ?? '';
+
+        // The original code uses a regex to extract content between >{ and }<
+        // This suggests the 'data' field might be an HTML string containing JSON
+        // If the Node.js script can be made to return pure JSON for data, that would be better.
+        // For now, retaining the original regex logic for data extraction from response
+        preg_match('~>{(.*)}<~', $extractedData, $d);
+        $finalData = $d[1] ?? '{}'; // Default to empty JSON object if not found
+
+        return [
+            'cookies' => trim($extractedCookies, ' ;'),
+            'data' => '{' . $finalData . '}', // Re-wrap in braces if it was stripped
+        ];
     }
 }
-
